@@ -1,4 +1,4 @@
-# K230 智能门锁系统 / K230 Smart Door Lock System
+# K230 自动开门系统 / K230 Smart Door  System
 
 一个本科阶段的小项目 利用K230开发板 MicroPython 实现智能开门
 
@@ -185,10 +185,6 @@ network.send_tcp_data(data)
 ## 许可证 / License
 
 MIT License
-
-## 联系方式 / Contact
-
-项目维护：K230 Development Team
 
 ---
 
