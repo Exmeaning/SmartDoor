@@ -1,0 +1,58 @@
+{
+    "system": {
+        "debug_mode": 0,
+        "log_level": "INFO",
+        "log_retention_days": 30,
+        "device_id": "K230_DOOR_001"
+    },
+    "network": {
+        "wifi_ssid": "YOUR_WIFI_SSID",
+        "wifi_password": "YOUR_WIFI_PASSWORD",
+        "tcp_server_ip": "10.100.228.5",
+        "tcp_server_port": 60000,
+        "ntp_sync": true,
+        "auto_reconnect": true,
+        "reconnect_interval": 5
+    },
+    "face_recognition": {
+        "det_model_path": "/sdcard/kmodel/face_detection_320.kmodel",
+        "reg_model_path": "/sdcard/kmodel/face_recognition.kmodel",
+        "anchors_path": "/sdcard/utils/prior_data_320.bin",
+        "database_dir": "/data/face_database/",
+        "photo_dir": "/data/photo/",
+        "confidence_threshold": 0.5,
+        "nms_threshold": 0.2,
+        "recognition_threshold": 0.65,
+        "max_faces": 100,
+        "sleep_check_interval": 1000
+    },
+    "motor": {
+        "pul_pin": 42,
+        "dir_pin": 33,
+        "en_pin": 32,
+        "frequency": 1000,
+        "open_duration": 3000,
+        "close_duration": 3000,
+        "pulse_width": 250,
+        "direction_width": 62500
+    },
+    "audio": {
+        "speaker_pin": 35,
+        "sample_rate": 24000,
+        "channels": 1,
+        "chunk_size": 7200,
+        "audio_files": {
+            "welcome": "/sdcard/audio/welcome.wav",
+            "access_granted": "/sdcard/audio/access_granted.wav",
+            "access_denied": "/sdcard/audio/access_denied.wav",
+            "network_connected": "/sdcard/audio/network_connected.wav",
+            "network_failed": "/sdcard/audio/network_failed.wav",
+            "register_success": "/sdcard/audio/register_success.wav"
+        }
+    },
+    "display": {
+        "rgb888p_size": [640, 480],
+        "display_size": [640, 480],
+        "display_mode": "lcd"
+    }
+}
