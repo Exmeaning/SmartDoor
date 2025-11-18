@@ -1,6 +1,6 @@
 from machine import Pin, PWM
 import utime
-import uos as os
+import uos
 from media.media import MediaManager
 from media.pyaudio import PyAudio
 import media.wave as wave
@@ -41,7 +41,8 @@ class AudioManager:
             duration_ms: 持续时间(毫秒)
         """
         try:
-            pwm = PWM(self.speaker, freq=frequency, duty=512)
+            # duty范围是0-100，50表示50%占空比
+            pwm = PWM(self.speaker, freq=frequency, duty=50)
             utime.sleep_ms(duration_ms)
             pwm.deinit()
             
@@ -71,7 +72,7 @@ class AudioManager:
         
         # 检查文件是否存在
         try:
-            os.stat(wav_file)
+            uos.stat(wav_file)
         except OSError:
             self.logger.warning(f"音频文件不存在: {wav_file}，使用蜂鸣提示")
             self._play_beep_fallback(wav_file)

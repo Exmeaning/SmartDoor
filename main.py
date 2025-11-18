@@ -1,6 +1,6 @@
 #!/usr/bin/env micropython
 """
-K230 智能门锁系统 / K230 Smart Door Lock System
+K230 智能开门系统 / K230 Smart Door System
 
 主程序入口 / Main program entry
 Author: Exmeaning
@@ -28,7 +28,8 @@ import ulab.numpy as np
 config = None
 logger = None
 network_mgr = None
-sleep_mgr = None
+sleep_mgr = 35
+
 door_ctrl = None
 face_recognizer = None
 pipeline = None
@@ -175,6 +176,7 @@ def face_recognition_thread():
     # 人脸识别主循环
     no_face_count = 0
     max_no_face_count = 30  # 连续30次无人脸进入休眠
+    last_log_time = 0  # 用于控制日志输出频率
     
     while running:
         try:
@@ -197,35 +199,68 @@ def face_recognition_thread():
                 img = pipeline.get_frame()
                 det_boxes, recg_res = face_recognizer.run(img)
                 
+                # 处理检测结果
                 if det_boxes and len(det_boxes) > 0:
-                    # 重置无人脸计数
+                    # 检测到人脸，重置无人脸计数
                     no_face_count = 0
                     sleep_mgr.update_activity()
-                    
-                    # 绘制结果
-                    face_recognizer.draw_result(pipeline, det_boxes, recg_res)
-                    
-                    # 处理识别结果
-                    recognized_person, confidence = face_recognizer.get_recognized_person(recg_res)
-                    
-                    if recognized_person:
-                        # 识别成功，开门
-                        logger.info(f"识别成功: {recognized_person} (置信度: {confidence:.2f})")
-                        door_ctrl.grant_access(recognized_person, "face", confidence)
-                    else:
-                        # 检测到人脸但未识别
-                        if len(recg_res) > 0:
-                            logger.warning("检测到未注册人脸")
-                            door_ctrl.deny_access("unregistered", "unknown")
-                    
-                else:
-                    # 未检测到人脸
+                elif recg_res and 'in_vacuum' not in recg_res:
+                    # 没有检测到人脸且不在真空期
                     no_face_count += 1
                     if no_face_count >= max_no_face_count:
                         # 进入休眠模式
                         sleep_mgr.enter_sleep()
                         no_face_count = 0
+                    
+                    # 清空显示
+                    pipeline.show_image()
+                    gc.collect()
+                    utime.sleep_ms(10)
+                    continue
                 
+                # 有人脸时的处理逻辑
+                if det_boxes and len(det_boxes) > 0:
+                    
+                    # 绘制结果
+                    face_recognizer.draw_result(pipeline, det_boxes, recg_res)
+                    
+                    # 检查是否需要处理结果（触发音频和日志）
+                    if face_recognizer.should_process_result(recg_res):
+                        trigger_type = face_recognizer.get_trigger_type(recg_res)
+                        
+                        if trigger_type == 'success':
+                            # 识别成功（窗口内首次成功，立即触发）
+                            person = face_recognizer.last_recognized_name
+                            score = face_recognizer.last_recognized_score
+                            
+                            logger.info(f"识别成功: {person} (置信度: {score:.2f})")
+                            door_ctrl.grant_access(person, "face", score)
+                            
+                        elif trigger_type == 'failed':
+                            # 识别失败（5秒窗口全部失败）
+                            logger.warning("5秒内全部识别失败，拒绝访问")
+                            door_ctrl.deny_access("unregistered", "unknown")
+                    else:
+                        # 在真空期或窗口内等待，仅显示实时状态
+                        if 'in_vacuum' in recg_res:
+                            # 真空期中，显示剩余时间
+                            remaining = face_recognizer.get_vacuum_remaining_time()
+                            if remaining > 0:
+                                logger.debug(f"真空期剩余: {remaining:.1f}秒")
+                        else:
+                            # 窗口内正常识别，降低日志频率避免刷屏
+                            current_time = utime.ticks_ms() / 1000.0
+                            if current_time - last_log_time > 1.0:  # 每秒最多输出一次
+                                person, score = face_recognizer.get_recognized_person(recg_res)
+                                if person:
+                                    logger.debug(f"窗口内识别到: {person} ({score:.2f})")
+                                elif len(recg_res) > 0 and 'already_success' not in recg_res:
+                                    elapsed = face_recognizer.get_window_elapsed_time()
+                                    if elapsed > 0:
+                                        logger.debug(f"识别窗口: 检测到未知人脸 ({elapsed:.1f}/5.0秒)")
+                                last_log_time = current_time
+                    
+                # 显示画面
                 pipeline.show_image()
             
             gc.collect()

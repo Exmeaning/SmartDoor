@@ -232,7 +232,6 @@ class FaceRegistrationApp(AIBase):
             matrix_dst = [matrix_dst[0][0], matrix_dst[0][1], matrix_dst[0][2],
                          matrix_dst[1][0], matrix_dst[1][1], matrix_dst[1][2]]
             return matrix_dst
-
 class FaceRecognition:
     """人脸识别主类 / Face recognition main class"""
     
@@ -264,6 +263,22 @@ class FaceRecognition:
         self.valid_register_face = 0
         self.db_name = []
         self.db_data = []
+        
+        # 识别窗口和真空期控制
+        self.recognition_window = 5  # 5秒识别窗口
+        self.vacuum_period = 5  # 5秒真空期
+        
+        # 状态控制
+        self.window_start_time = 0  # 窗口开始时间
+        self.in_vacuum = False  # 是否在真空期
+        self.vacuum_start_time = 0  # 真空期开始时间
+        
+        # 窗口内统计
+        self.window_has_success = False  # 窗口内是否有成功识别
+        self.window_face_count = 0  # 窗口内检测到的人脸数
+        self.window_unknown_count = 0  # 窗口内未知人脸数
+        self.last_recognized_name = None  # 最后识别的人名
+        self.last_recognized_score = 0  # 最后识别的分数
 
         # 初始化UART通信
         try:
@@ -293,49 +308,186 @@ class FaceRecognition:
         self.database_init()
 
     def run(self, input_np):
-        """运行人脸识别"""
+        """运行人脸识别 - 5秒识别窗口机制"""
+        current_time = time.ticks_ms() / 1000.0  # 转换为秒
+        
+        # 检查是否在真空期
+        if self.in_vacuum:
+            time_since_vacuum = current_time - self.vacuum_start_time
+            if time_since_vacuum < self.vacuum_period:
+                # 仍在真空期
+                remaining = self.vacuum_period - time_since_vacuum
+                self.logger.debug(f"真空期中，剩余 {remaining:.1f}秒")
+                return [], ['in_vacuum']
+            else:
+                # 真空期结束，重置状态，开始新窗口
+                self.logger.info("真空期结束，开始新的识别窗口")
+                self.in_vacuum = False
+                self.reset_window_stats()
+                self.window_start_time = current_time
+        
+        # 检查是否需要开始新窗口
+        if self.window_start_time == 0:
+            self.window_start_time = current_time
+            self.reset_window_stats()
+            self.logger.debug("开始新的识别窗口")
+        
+        # 执行人脸检测
         det_boxes, landms = self.face_det.run(input_np)
         recg_res = []
-
+        
+        # 如果没有检测到人脸
+        if not det_boxes:
+            # 检查窗口是否超时（5秒）
+            window_elapsed = current_time - self.window_start_time
+            if window_elapsed >= self.recognition_window:
+                if self.window_face_count == 0:
+                    # 5秒内都没有检测到人脸，重置窗口继续等待
+                    self.reset_window_stats()
+                    self.window_start_time = current_time
+                elif not self.window_has_success and self.window_unknown_count > 0:
+                    # 5秒内只检测到未知人脸，触发失败处理
+                    self.logger.info(f"识别窗口结束：5秒内检测到{self.window_unknown_count}次未知人脸")
+                    recg_res = ['trigger_failed']
+                    # 进入真空期
+                    self.enter_vacuum_period()
+                else:
+                    # 重置窗口
+                    self.reset_window_stats()
+                    self.window_start_time = current_time
+            return det_boxes, recg_res
+        
+        # 更新窗口统计
+        self.window_face_count += len(det_boxes)
+        
+        # 执行人脸识别
         for landm in landms:
             self.face_reg.config_preprocess(landm)
             feature = self.face_reg.run(input_np)
             res = self.database_search(feature)
             recg_res.append(res)
-
+        
+        # 检查识别结果
+        recognized_person, score = self.get_recognized_person(recg_res)
+        
+        if recognized_person:
+            # 识别成功，立即触发成功处理
+            if not self.window_has_success:
+                self.logger.info(f"窗口内首次识别成功: {recognized_person}, 分数: {score:.2f}")
+                self.window_has_success = True
+                self.last_recognized_name = recognized_person
+                self.last_recognized_score = score
+                
+                # 标记需要触发成功处理
+                recg_res.append('trigger_success')
+                
+                # 进入真空期
+                self.enter_vacuum_period()
+            else:
+                # 窗口内已经有成功，等待真空期
+                recg_res = ['already_success']
+        else:
+            # 识别失败（unknown）
+            self.window_unknown_count += 1
+            
+            # 检查窗口是否超时
+            window_elapsed = current_time - self.window_start_time
+            if window_elapsed >= self.recognition_window and not self.window_has_success:
+                # 5秒窗口结束且全部失败，触发失败处理
+                self.logger.info(f"识别窗口结束：5秒内全部失败({self.window_unknown_count}次)")
+                recg_res.append('trigger_failed')
+                
+                # 进入真空期
+                self.enter_vacuum_period()
+        
         return det_boxes, recg_res
-
+    
+    def reset_window_stats(self):
+        """重置窗口统计"""
+        self.window_has_success = False
+        self.window_face_count = 0
+        self.window_unknown_count = 0
+        self.last_recognized_name = None
+        self.last_recognized_score = 0
+    
+    def enter_vacuum_period(self):
+        """进入真空期"""
+        current_time = time.ticks_ms() / 1000.0
+        self.in_vacuum = True
+        self.vacuum_start_time = current_time
+        self.logger.info(f"进入{self.vacuum_period}秒真空期")
     def database_init(self):
         """初始化人脸数据库"""
         with ScopedTiming("database_init", self.debug_mode > 1):
+            # 自动创建数据库目录
+            self._ensure_directory(self.database_dir)
+        
             try:
-                os.stat(self.database_dir)
                 db_file_list = os.listdir(self.database_dir)
+            
                 for db_file in db_file_list:
                     if not db_file.endswith('.bin'):
                         continue
                     if self.valid_register_face >= self.max_register_face:
                         break
-                        
-                    full_db_file = self.database_dir + db_file
+                
+                    # 拼接路径
+                    if self.database_dir.endswith('/'):
+                        full_db_file = self.database_dir + db_file
+                    else:
+                        full_db_file = self.database_dir + '/' + db_file
+                
+                    try:
+                        with open(full_db_file, 'rb') as f:
+                            data = f.read()
                     
-                    with open(full_db_file, 'rb') as f:
-                        data = f.read()
-                    feature = np.frombuffer(data, dtype=np.float)
-                    self.db_data.append(feature)
+                        feature = np.frombuffer(data, dtype=np.float32)
+                        self.db_data.append(feature)
                     
-                    name = db_file.split('.')[0]
-                    self.db_name.append(name)
-                    self.valid_register_face += 1
-                    
+                        name = db_file.split('.')[0]
+                        self.db_name.append(name)
+                        self.valid_register_face += 1
+                    except Exception as e:
+                        self.logger.warning(f"加载文件失败 {db_file}: {e}")
+                        continue
+            
                 self.logger.info(f"加载了 {self.valid_register_face} 个人脸特征")
-                    
+                
             except Exception as e:
                 self.logger.error(f"数据库初始化失败: {e}")
 
-            except OSError:  
-                self.logger.warning(f"数据库目录不存在: {self.database_dir}")  
-                return
+    def _ensure_directory(self, path):
+        """确保目录存在，不存在则创建"""
+        try:
+            os.stat(path)
+            return True
+        except OSError:
+            self.logger.info(f"目录不存在，正在创建: {path}")
+        
+        # 递归创建目录
+        path = path.rstrip('/')
+        parts = path.split('/')
+        current = ''
+    
+        for i, part in enumerate(parts):
+            if i == 0 and not part:  # Unix根目录
+                current = '/'
+                continue
+        
+            current = current + '/' + part if current and current != '/' else (current + part if current else part)
+        
+            try:
+                os.stat(current)
+            except OSError:
+                try:
+                    os.mkdir(current)
+                    self.logger.debug(f"创建: {current}")
+                except Exception as e:
+                    self.logger.error(f"创建目录失败 {current}: {e}")
+                    raise Exception(f"无法创建目录: {path}")
+    
+        self.logger.info(f"目录创建成功: {path}")
+        return True
 
     def database_reset(self):
         """重置数据库"""
@@ -422,6 +574,66 @@ class FaceRecognition:
                     return name, score
         
         return None, 0.0
+    
+    def is_in_vacuum_period(self):
+        """检查是否在真空期"""
+        return self.in_vacuum
+    
+    def get_vacuum_remaining_time(self):
+        """获取真空期剩余时间"""
+        if not self.in_vacuum:
+            return 0
+        
+        current_time = time.ticks_ms() / 1000.0
+        elapsed = current_time - self.vacuum_start_time
+        remaining = max(0, self.vacuum_period - elapsed)
+        return remaining
+    
+    def get_window_elapsed_time(self):
+        """获取当前窗口已用时间"""
+        if self.window_start_time == 0:
+            return 0
+        
+        current_time = time.ticks_ms() / 1000.0
+        elapsed = current_time - self.window_start_time
+        return elapsed
+    
+    def reset_vacuum_period(self):
+        """重置真空期状态"""
+        self.in_vacuum = False
+        self.vacuum_start_time = 0
+        self.window_start_time = 0
+        self.reset_window_stats()
+        self.logger.info("识别状态已完全重置")
+    
+    def should_process_result(self, recg_results):
+        """检查是否应该处理识别结果（用于触发音频和日志）"""
+        if not recg_results:
+            return False
+        
+        # 检查特殊标记
+        for res in recg_results:
+            if res == 'trigger_success':
+                return True  # 需要处理成功
+            elif res == 'trigger_failed':
+                return True  # 需要处理失败
+            elif res in ['in_vacuum', 'already_success']:
+                return False  # 不需要处理
+        
+        return False  # 默认不处理
+    
+    def get_trigger_type(self, recg_results):
+        """获取触发类型"""
+        if not recg_results:
+            return None
+        
+        for res in recg_results:
+            if res == 'trigger_success':
+                return 'success'
+            elif res == 'trigger_failed':
+                return 'failed'
+        
+        return None
 
     def deinit(self):
         """释放资源"""
