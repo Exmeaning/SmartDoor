@@ -209,12 +209,13 @@ class FaceRegister:
             self.logger.error(f"批量注册失败: {e}")
             return False
     
-    def register_from_camera(self, person_name, pl=None):
+    def register_from_camera(self, person_name, pl=None, upload_to_server=True):
         """从摄像头实时注册人脸
         
         Args:
             person_name: 要注册的人员名称
             pl: Pipeline对象，如果为None则创建新的
+            upload_to_server: 是否上传到服务器
         """
         try:
             if not self.face_det or not self.face_reg:
@@ -267,6 +268,10 @@ class FaceRegister:
                             file.write(feature.tobytes())
                         
                         self.logger.info(f'成功注册人脸: {person_name}')
+                        
+                        # 上传到服务器
+                        if upload_to_server:
+                            self._upload_registration_to_server(person_name, img, feature)
                         
                         if need_cleanup:
                             pl.destroy()
@@ -354,6 +359,183 @@ class FaceRegister:
         except Exception as e:
             self.logger.error(f"列出注册失败: {e}")
             return []
+    
+    def _upload_registration_to_server(self, person_name, img, feature):
+        """上传注册信息到服务器"""
+        try:
+            # 获取网络管理器
+            from core.network_manager import NetworkManager
+            network_mgr = NetworkManager()
+            
+            if not network_mgr.is_connected or not network_mgr.http_client:
+                self.logger.warning("网络未连接，跳过上传")
+                return False
+            
+            # 准备上传数据
+            registration_data = {
+                'device_id': self.config.get('system.device_id', 'unknown'),
+                'person_name': person_name,
+                'timestamp': utime.time(),
+                'feature_size': len(feature.tobytes())
+            }
+            
+            # 转换图像为JPEG格式（或使用十六进制编码）
+            if hasattr(img, 'compress'):
+                img.compress(quality=85)
+                image_data = img.to_bytes()
+            else:
+                image_data = bytes(img)
+            
+            # 获取特征数据
+            feature_bytes = feature.tobytes()
+            
+            # 方案1：使用multipart直接上传二进制
+            use_multipart = True
+            
+            if use_multipart:
+                # 使用multipart上传
+                files = {
+                    'image': (f'{person_name}.jpg', image_data),
+                    'feature': (f'{person_name}.bin', feature_bytes)
+                }
+                
+                fields = {
+                    'metadata': registration_data
+                }
+                
+                # 发送到服务器
+                response = network_mgr.http_client.upload_multipart(
+                    '/api/face/register',
+                    files,
+                    fields
+                )
+            else:
+                # 方案2：使用JSON上传（十六进制编码）
+                hex_image = network_mgr.http_client.hex_encode(image_data)
+                hex_feature = network_mgr.http_client.hex_encode(feature_bytes)
+                
+                json_data = {
+                    'device_id': registration_data['device_id'],
+                    'person_name': person_name,
+                    'timestamp': registration_data['timestamp'],
+                    'image_hex': hex_image,
+                    'feature_hex': hex_feature,
+                    'image_size': len(image_data),
+                    'feature_size': len(feature_bytes)
+                }
+                
+                response = network_mgr.http_post('/api/face/register/hex', json_data)
+            
+            if response and response.get('success'):
+                self.logger.info(f"注册信息已上传到服务器: {person_name}")
+                
+                # 发送注册成功事件
+                network_mgr.send_event('face_registered', {
+                    'name': person_name,
+                    'method': 'camera',
+                    'success': True
+                })
+                return True
+            else:
+                self.logger.warning(f"上传注册信息失败: {response}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"上传注册信息异常: {e}")
+            return False
+    
+    def sync_with_server(self):
+        """与服务器同步人脸数据库"""
+        try:
+            from core.network_manager import NetworkManager
+            network_mgr = NetworkManager()
+            
+            if not network_mgr.is_connected:
+                self.logger.warning("网络未连接")
+                return False
+            
+            # 获取本地注册列表
+            local_faces = self.list_registrations()
+            local_names = [f['name'] for f in local_faces]
+            
+            # 请求服务器的注册列表
+            response = network_mgr.http_get('/api/face/list')
+            
+            if response and response['status_code'] == 200:
+                server_data = response.get('body', {})
+                server_faces = server_data.get('data', {}).get('faces', [])
+                
+                # 下载服务器有但本地没有的人脸
+                for face_info in server_faces:
+                    name = face_info.get('name')
+                    if name and name not in local_names:
+                        self.logger.info(f"从服务器下载人脸: {name}")
+                        self._download_face_from_server(name)
+                
+                # 上传本地有但服务器没有的人脸
+                server_names = [f.get('name') for f in server_faces]
+                for local_face in local_faces:
+                    name = local_face['name']
+                    if name not in server_names:
+                        self.logger.info(f"上传人脸到服务器: {name}")
+                        # 这里需要读取本地特征文件并上传
+                        # self._upload_local_face_to_server(name)
+                
+                self.logger.info("人脸数据库同步完成")
+                return True
+            else:
+                self.logger.error("获取服务器人脸列表失败")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"同步失败: {e}")
+            return False
+    
+    def _download_face_from_server(self, person_name):
+        """从服务器下载人脸特征"""
+        try:
+            from core.network_manager import NetworkManager
+            network_mgr = NetworkManager()
+            
+            # 请求下载特征文件
+            response = network_mgr.http_get(f'/api/face/download/{person_name}')
+            
+            if response and response['status_code'] == 200:
+                body = response.get('body')
+                
+                # 判断响应格式
+                if isinstance(body, dict):
+                    # JSON格式，包含十六进制编码的特征
+                    feature_hex = body.get('data', {}).get('feature_hex')
+                    if feature_hex:
+                        # 将十六进制字符串转换为字节
+                        feature_data = bytes.fromhex(feature_hex)
+                    else:
+                        self.logger.error("响应中没有feature_hex字段")
+                        return False
+                elif isinstance(body, bytes):
+                    # 直接是二进制数据
+                    feature_data = body
+                else:
+                    self.logger.error(f"不支持的响应格式: {type(body)}")
+                    return False
+                
+                # 保存到本地数据库
+                self.ensure_dir(self.database_dir)
+                feature_file = self.database_dir + '{}.bin'.format(person_name)
+                
+                with open(feature_file, "wb") as file:
+                    file.write(feature_data)
+                
+                self.logger.info(f"成功下载人脸: {person_name}")
+                return True
+            else:
+                self.logger.error(f"下载人脸失败: {person_name}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"下载异常: {e}")
+            return False
     
     def deinit(self):
         """释放资源"""

@@ -23,6 +23,7 @@ class DoorController:
         self.is_locked = True
         self.last_access_time = 0
         self.access_count = 0
+        self.failed_attempts = 0
         
         # 访问记录
         self.access_history = []
@@ -30,6 +31,10 @@ class DoorController:
         
         # 图片缓存（用于上传）
         self.last_captured_image = None
+        self.last_captured_path = None
+        
+        # 门配置
+        self.door_id = self.config.get('door.id', 'main')
         
         # 获取网络管理器实例（如果可用）
         self.network_mgr = None
@@ -55,6 +60,8 @@ class DoorController:
             confidence: 置信度
         """
         try:
+            current_time = utime.time()
+            
             # 记录日志
             self.logger.log_door_event("ACCESS_GRANTED", person_name, method, 
                                      {"confidence": confidence})
@@ -67,7 +74,7 @@ class DoorController:
             
             if success:
                 self.is_locked = False
-                self.last_access_time = utime.time()
+                self.last_access_time = current_time
                 self.access_count += 1
                 
                 # 添加到访问历史
@@ -79,28 +86,21 @@ class DoorController:
                     "result": "granted"
                 })
                 
-                # 发送到云端
-                cloud_data = {
-                    "event": "access_granted",
+                # 准备完整的事件数据
+                event_data = {
                     "person": person_name,
                     "method": method,
                     "confidence": confidence,
-                    "time": self.last_access_time,
-                    "door_id": self.config.get('door.id', 'main'),
-                    "device_id": self.config.get('system.device_id')
+                    "door_id": self.door_id,
+                    "time": current_time,
+                    "access_count": self.access_count
                 }
-                self._send_to_cloud(cloud_data)
                 
-                # 如果有捕获的图像，上传到服务器
-                if self.last_captured_image and self.network_mgr and self.network_mgr.is_connected:
-                    try:
-                        filename = f"granted_{person_name}_{int(self.last_access_time)}.jpg"
-                        self.network_mgr.upload_image('/api/upload/granted', 
-                                                     self.last_captured_image, 
-                                                     filename)
-                        self.logger.debug(f"已上传访问图像: {filename}")
-                    except Exception as e:
-                        self.logger.debug(f"上传图像失败: {e}")
+                # 发送事件和图像到服务器
+                self._send_access_event("access_granted", event_data, person_name, True)
+                
+                # 清空缓存的图像
+                self.clear_captured_image()
                 
                 return True
             else:
@@ -120,6 +120,7 @@ class DoorController:
         """
         try:
             current_time = utime.time()
+            self.failed_attempts += 1
             
             # 记录日志
             self.logger.log_door_event("ACCESS_DENIED", person_name, "face", 
@@ -136,27 +137,20 @@ class DoorController:
                 "result": "denied"
             })
             
-            # 发送警告到云端
-            cloud_data = {
-                "event": "access_denied",
+            # 准备完整的事件数据
+            event_data = {
                 "person": person_name,
                 "reason": reason,
+                "door_id": self.door_id,
                 "time": current_time,
-                "door_id": self.config.get('door.id', 'main'),
-                "device_id": self.config.get('system.device_id')
+                "failed_attempts": self.failed_attempts
             }
-            self._send_to_cloud(cloud_data)
             
-            # 如果有捕获的图像，上传到服务器作为安全记录
-            if self.last_captured_image and self.network_mgr and self.network_mgr.is_connected:
-                try:
-                    filename = f"denied_{person_name}_{int(current_time)}.jpg"
-                    self.network_mgr.upload_image('/api/upload/denied', 
-                                                 self.last_captured_image, 
-                                                 filename)
-                    self.logger.debug(f"已上传拒绝访问图像: {filename}")
-                except Exception as e:
-                    self.logger.debug(f"上传图像失败: {e}")
+            # 发送事件和图像到服务器
+            self._send_access_event("access_denied", event_data, person_name, False)
+            
+            # 清空缓存的图像
+            self.clear_captured_image()
             
         except Exception as e:
             self.logger.error(f"记录拒绝访问失败: {e}")
@@ -253,13 +247,107 @@ class DoorController:
         except Exception as e:
             self.logger.error(f"发送云端数据失败: {e}")
     
-    def set_captured_image(self, image_data):
+    def set_captured_image(self, image_data, image_path=None):
         """设置捕获的图像数据（供人脸识别模块调用）
         
         Args:
             image_data: 图像数据（bytes格式）
+            image_path: 图像文件路径（可选）
         """
         self.last_captured_image = image_data
+        self.last_captured_path = image_path
+    
+    def clear_captured_image(self):
+        """清空缓存的图像数据"""
+        self.last_captured_image = None
+        self.last_captured_path = None
+    
+    def _send_access_event(self, event_type, event_data, person_name, is_granted):
+        """发送访问事件到服务器（包括JSON和图像）
+        
+        Args:
+            event_type: 事件类型（access_granted/access_denied）
+            event_data: 事件数据
+            person_name: 人员名称
+            is_granted: 是否授权通过
+        """
+        try:
+            # 检查网络是否可用
+            if not self.network_mgr or not self.network_mgr.is_connected:
+                self.logger.debug("网络不可用，事件已缓存")
+                # TODO: 实现离线缓存机制
+                return
+            
+            # 检查HTTP客户端是否可用
+            if not hasattr(self.network_mgr, 'http_client') or not self.network_mgr.http_client:
+                self.logger.debug("HTTP客户端不可用")
+                return
+            
+            image_url = None
+            
+            # 上传图像（如果有）
+            if self.last_captured_image:
+                try:
+                    # 生成文件名
+                    status = "granted" if is_granted else "denied"
+                    safe_name = person_name.replace(" ", "_").replace("/", "_")
+                    timestamp = int(event_data['time'])
+                    filename = f"{status}_{safe_name}_{timestamp}.jpg"
+                    
+                    # 准备multipart上传数据
+                    files = {
+                        'file': (filename, self.last_captured_image)
+                    }
+                    
+                    # 准备元数据
+                    metadata = {
+                        'person': person_name,
+                        'timestamp': timestamp,
+                        'device_id': self.config.get('system.device_id', 'unknown'),
+                        'confidence': event_data.get('confidence', 0)
+                    }
+                    
+                    if not is_granted:
+                        metadata['reason'] = event_data.get('reason', 'unknown')
+                    
+                    fields = {
+                        'metadata': metadata
+                    }
+                    
+                    # 选择上传端点
+                    upload_endpoint = '/api/upload/granted' if is_granted else '/api/upload/denied'
+                    
+                    # 上传图像
+                    response = self.network_mgr.http_client.upload_multipart(
+                        upload_endpoint,
+                        files,
+                        fields
+                    )
+                    
+                    if response and response.get('success'):
+                        image_url = response.get('data', {}).get('url')
+                        self.logger.info(f"图像已上传: {filename}")
+                    else:
+                        self.logger.warning(f"图像上传失败: {response}")
+                        
+                except Exception as e:
+                    self.logger.error(f"上传图像异常: {e}")
+            
+            # 添加图像URL到事件数据
+            if image_url:
+                event_data['face_image_url'] = image_url
+            
+            # 如果有本地图像路径，也添加
+            if self.last_captured_path:
+                event_data['local_image_path'] = self.last_captured_path
+            
+            # 发送事件JSON到服务器
+            self.network_mgr.send_event(event_type, event_data)
+            
+            self.logger.info(f"事件已发送到服务器: {event_type}")
+            
+        except Exception as e:
+            self.logger.error(f"发送访问事件失败: {e}")
     
     def get_statistics(self):
         """获取统计信息 / Get statistics"""

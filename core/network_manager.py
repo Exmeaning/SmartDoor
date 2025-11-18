@@ -16,6 +16,7 @@ class NetworkManager:
         self.http_server_url = None
         self.http_token = None
         self.http_timeout = 10
+        self.http_client = None
         
     def connect_wifi(self, max_retry=3):
         """连接WiFi网络 / Connect to WiFi network"""
@@ -116,8 +117,15 @@ class NetworkManager:
         if not self.http_token:
             self.logger.warning("HTTP Token未配置，可能导致认证失败")
         
-        self.logger.info(f"HTTP客户端配置完成: {self.http_server_url}")
-        return True
+        # 创建HTTP客户端实例
+        try:
+            from core.http_client import HTTPClient
+            self.http_client = HTTPClient(self.http_server_url, self.http_token, self.http_timeout)
+            self.logger.info(f"HTTP客户端配置完成: {self.http_server_url}")
+            return True
+        except Exception as e:
+            self.logger.error(f"创建HTTP客户端失败: {e}")
+            return False
     
     def http_request(self, method, endpoint, data=None, headers=None):
         """发送HTTP请求 / Send HTTP request"""
@@ -222,6 +230,27 @@ class NetworkManager:
         except Exception as e:
             self.logger.error(f"图片上传异常: {e}")
             return False
+    
+    def poll_server(self):
+        """轮询服务器获取命令"""
+        if not self.http_client or not self.is_connected:
+            return None
+            
+        return self.http_client.poll_server()
+    
+    def get_ip_address(self):
+        """获取IP地址"""
+        if self.sta and self.sta.isconnected():
+            return self.sta.ifconfig()[0]
+        return "0.0.0.0"
+    
+    def get_mac_address(self):
+        """获取MAC地址"""
+        if self.sta:
+            import ubinascii
+            mac = ubinascii.hexlify(self.sta.config('mac'), ':').decode()
+            return mac.upper()
+        return "00:00:00:00:00:00"
     
     def send_event(self, event_type, event_data):
         """发送事件到服务器 / Send event to server"""

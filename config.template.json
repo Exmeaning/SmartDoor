@@ -37,7 +37,7 @@
         "sleep_check_interval": 1000
     },
     "motor": {
-        "pul_pin": 42,
+        "pul_pin": 43,
         "dir_pin": 33,
         "en_pin": 32,
         "frequency": 1000,
@@ -47,7 +47,7 @@
         "direction_width": 62500
     },
     "audio": {
-        "speaker_pin": 35,
+        "speaker_pin": 42,
         "sample_rate": 24000,
         "channels": 1,
         "chunk_size": 7200,

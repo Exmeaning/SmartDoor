@@ -256,6 +256,13 @@ class FaceRecognition:
         self.rgb888p_size = [ALIGN_UP(rgb888p_size[0],16), rgb888p_size[1]]
         self.display_size = [ALIGN_UP(display_size[0],16), display_size[1]]
         self.debug_mode = debug_mode
+        
+        # 图像捕获相关
+        self.capture_dir = "/data/captures/"
+        self.capture_enabled = self.config.get('face_recognition.capture_enabled', True)
+        self.capture_max_files = self.config.get('face_recognition.capture_max_files', 100)
+        self.last_captured_image = None  # 保存最后捕获的图像路径
+        self.last_captured_data = None  # 保存最后捕获的图像数据
 
         # 数据库参数
         self.max_register_face = 100
@@ -310,6 +317,9 @@ class FaceRecognition:
     def run(self, input_np):
         """运行人脸识别 - 5秒识别窗口机制"""
         current_time = time.ticks_ms() / 1000.0  # 转换为秒
+        
+        # 保存当前帧供后续捕获使用
+        self.current_frame = input_np
         
         # 检查是否在真空期
         if self.in_vacuum:
@@ -378,6 +388,9 @@ class FaceRecognition:
                 self.last_recognized_name = recognized_person
                 self.last_recognized_score = score
                 
+                # 捕获图像
+                self.capture_face_image(recognized_person, score, True, det_boxes)
+                
                 # 标记需要触发成功处理
                 recg_res.append('trigger_success')
                 
@@ -395,6 +408,10 @@ class FaceRecognition:
             if window_elapsed >= self.recognition_window and not self.window_has_success:
                 # 5秒窗口结束且全部失败，触发失败处理
                 self.logger.info(f"识别窗口结束：5秒内全部失败({self.window_unknown_count}次)")
+                
+                # 捕获图像
+                self.capture_face_image("unknown", 0, False, det_boxes)
+                
                 recg_res.append('trigger_failed')
                 
                 # 进入真空期
@@ -635,6 +652,154 @@ class FaceRecognition:
         
         return None
 
+    def capture_face_image(self, person_name, score, is_success, det_boxes):
+        """捕获并保存人脸图像
+        
+        Args:
+            person_name: 识别的人名或"unknown"
+            score: 识别分数
+            is_success: 是否识别成功
+            det_boxes: 检测到的人脸框
+        """
+        if not self.capture_enabled:
+            return
+        
+        try:
+            # 确保捕获目录存在
+            self._ensure_directory(self.capture_dir)
+            
+            # 生成文件名
+            timestamp = int(time.ticks_ms())
+            status = "granted" if is_success else "denied"
+            safe_name = person_name.replace(" ", "_").replace("/", "_")
+            
+            # 根据日期创建子目录
+            import utime
+            date = utime.localtime()
+            date_dir = f"{self.capture_dir}{date[0]:04d}{date[1]:02d}{date[2]:02d}/"
+            self._ensure_directory(date_dir)
+            
+            # 完整文件路径
+            filename = f"{status}_{safe_name}_{timestamp}.jpg"
+            filepath = date_dir + filename
+            
+            # 保存图像
+            if hasattr(self, 'current_frame') and self.current_frame is not None:
+                # 将numpy数组转换为图像
+                img = self._numpy_to_image(self.current_frame, det_boxes)
+                
+                if img:
+                    # 保存为JPEG
+                    img.compress(quality=85)
+                    img.save(filepath)
+                    
+                    # 保存图像数据供上传使用
+                    self.last_captured_image = filepath
+                    self.last_captured_data = img.to_bytes()
+                    
+                    self.logger.info(f"捕获图像保存: {filepath}")
+                    
+                    # 清理旧图像
+                    self._cleanup_old_captures(date_dir)
+            
+        except Exception as e:
+            self.logger.error(f"捕获图像失败: {e}")
+    
+    def _numpy_to_image(self, np_array, det_boxes=None):
+        """将numpy数组转换为图像对象
+        
+        Args:
+            np_array: numpy数组格式的图像
+            det_boxes: 可选的人脸框，用于绘制
+        """
+        try:
+            # 尝试直接使用当前帧作为Image对象
+            # 因为pipeline.get_frame()可能返回的是Image对象而不是numpy数组
+            if hasattr(np_array, 'compress'):
+                # 已经是Image对象
+                img = np_array
+            else:
+                # 创建新的图像对象
+                img = image.Image(self.rgb888p_size[0], self.rgb888p_size[1], image.RGB888)
+            
+            # 如果有人脸框，可以在图像上绘制
+            if det_boxes and len(det_boxes) > 0:
+                for det in det_boxes:
+                    x1, y1, w_box, h_box = map(int, det[:4])
+                    # 绘制矩形框
+                    img.draw_rectangle(x1, y1, w_box, h_box, 
+                                      color=(0, 255, 0) if self.last_recognized_name else (255, 0, 0),
+                                      thickness=2)
+                    
+                    # 添加文字标签
+                    if self.last_recognized_name:
+                        text = f"{self.last_recognized_name} ({self.last_recognized_score:.2f})"
+                    else:
+                        text = "Unknown"
+                    img.draw_string(x1, y1 - 10, text, color=(255, 255, 255))
+            
+            return img
+            
+        except Exception as e:
+            self.logger.error(f"转换图像失败: {e}")
+            # 尝试直接保存原始数据
+            try:
+                # 创建默认图像
+                img = image.Image(self.rgb888p_size[0], self.rgb888p_size[1], image.RGB888)
+                return img
+            except:
+                return None
+    
+    def _cleanup_old_captures(self, directory):
+        """清理旧的捕获图像
+        
+        Args:
+            directory: 要清理的目录
+        """
+        try:
+            files = os.listdir(directory)
+            
+            # 如果文件数超过限制
+            if len(files) > self.capture_max_files:
+                # 获取文件信息并排序
+                file_info = []
+                for f in files:
+                    if f.endswith('.jpg'):
+                        filepath = directory + f
+                        try:
+                            stat = os.stat(filepath)
+                            file_info.append((filepath, stat[8]))  # stat[8]是修改时间
+                        except:
+                            continue
+                
+                # 按时间排序，删除最旧的文件
+                file_info.sort(key=lambda x: x[1])
+                
+                # 删除超出数量的文件
+                files_to_delete = len(file_info) - self.capture_max_files + 10  # 留10个缓冲
+                for i in range(files_to_delete):
+                    try:
+                        os.remove(file_info[i][0])
+                        self.logger.debug(f"删除旧图像: {file_info[i][0]}")
+                    except:
+                        continue
+                        
+        except Exception as e:
+            self.logger.debug(f"清理旧图像失败: {e}")
+    
+    def get_last_captured_image(self):
+        """获取最后捕获的图像信息
+        
+        Returns:
+            tuple: (图像路径, 图像数据) 或 (None, None)
+        """
+        return self.last_captured_image, self.last_captured_data
+    
+    def clear_captured_image(self):
+        """清除缓存的捕获图像"""
+        self.last_captured_image = None
+        self.last_captured_data = None
+    
     def deinit(self):
         """释放资源"""
         try:

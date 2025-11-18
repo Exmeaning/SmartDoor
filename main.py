@@ -40,7 +40,7 @@ def init_system():
     global config, logger, network_mgr, sleep_mgr, door_ctrl, pipeline
     
     print("=" * 50)
-    print("K230 智能门锁系统启动 / K230 Smart Door Lock Starting")
+    print("K230 智能开门系统启动 / K230 Smart Door Starting")
     print("=" * 50)
     
     try:
@@ -85,7 +85,7 @@ def init_system():
 
 def network_thread():
     """网络线程 / Network thread"""
-    global network_mgr, door_ctrl, running
+    global network_mgr, door_ctrl, face_recognizer, running
     
     logger = get_logger()
     logger.info("网络线程启动")
@@ -102,7 +102,9 @@ def network_thread():
             device_info = {
                 'device_id': config.get('system.device_id', 'unknown'),
                 'device_name': config.get('system.device_name', 'K230'),
-                'firmware_version': config.get('system.version', '1.0.0')
+                'firmware_version': config.get('system.version', '1.0.0'),
+                'ip_address': network_mgr.get_ip_address(),
+                'mac_address': network_mgr.get_mac_address()
             }
             network_mgr.send_event('device_online', device_info)
         else:
@@ -113,6 +115,8 @@ def network_thread():
     
     # 网络监控循环
     last_heartbeat = utime.time()
+    last_poll = utime.time()
+    
     while running:
         try:
             # 自动重连检查
@@ -121,16 +125,24 @@ def network_thread():
                     if network_mgr.auto_reconnect():
                         network_mgr.init_http_client()
             
-            # 发送心跳
             current_time = utime.time()
-            if current_time - last_heartbeat > 30:  # 每30秒发送一次心跳
+            
+            # 轮询服务器命令（每秒一次）
+            if network_mgr.is_connected and current_time - last_poll >= 1:
+                command = network_mgr.poll_server()
+                if command:
+                    handle_server_command(command)
+                last_poll = current_time
+            
+            # 发送心跳（每30秒）
+            if current_time - last_heartbeat > 30:
                 if network_mgr.is_connected:
                     response = network_mgr.http_get('/api/heartbeat')
                     if response and response['status_code'] == 200:
                         logger.debug("心跳发送成功")
                     last_heartbeat = current_time
             
-            utime.sleep(5)  # 每5秒检查一次
+            utime.sleep(0.5)  # 降低sleep时间以提高轮询响应速度
             
         except Exception as e:
             logger.error(f"网络线程错误: {e}")
@@ -247,19 +259,16 @@ def face_recognition_thread():
                 # 有人脸时的处理逻辑
                 if det_boxes and len(det_boxes) > 0:
                     
-                    # 保存当前帧图像（用于上传）
+                    # 获取捕获的图像（如果有）
                     try:
-                        if door_ctrl and img is not None:
-                            # 将图像数据传递给door_ctrl以便后续上传
-                            # 转换为JPEG格式的bytes
-                            import ubinascii
-                            if hasattr(img, 'tobytes'):
-                                image_bytes = img.tobytes()
-                            else:
-                                image_bytes = bytes(img)
-                            door_ctrl.set_captured_image(image_bytes)
+                        if door_ctrl and face_recognizer:
+                            # 从face_recognizer获取最后捕获的图像
+                            image_path, image_data = face_recognizer.get_last_captured_image()
+                            if image_data:
+                                door_ctrl.set_captured_image(image_data)
+                                logger.debug(f"使用捕获的图像: {image_path}")
                     except Exception as e:
-                        logger.debug(f"保存图像失败: {e}")
+                        logger.debug(f"获取捕获图像失败: {e}")
                     
                     # 绘制结果
                     face_recognizer.draw_result(pipeline, det_boxes, recg_res)
@@ -273,13 +282,29 @@ def face_recognition_thread():
                             person = face_recognizer.last_recognized_name
                             score = face_recognizer.last_recognized_score
                             
+                            # 获取捕获的图像
+                            image_path, image_data = face_recognizer.get_last_captured_image()
+                            if image_data:
+                                door_ctrl.set_captured_image(image_data, image_path)
+                            
                             logger.info(f"识别成功: {person} (置信度: {score:.2f})")
                             door_ctrl.grant_access(person, "face", score)
                             
+                            # 清空face_recognizer的图像缓存
+                            face_recognizer.clear_captured_image()
+                            
                         elif trigger_type == 'failed':
                             # 识别失败（5秒窗口全部失败）
+                            # 获取捕获的图像
+                            image_path, image_data = face_recognizer.get_last_captured_image()
+                            if image_data:
+                                door_ctrl.set_captured_image(image_data, image_path)
+                            
                             logger.warning("5秒内全部识别失败，拒绝访问")
                             door_ctrl.deny_access("unregistered", "unknown")
+                            
+                            # 清空face_recognizer的图像缓存
+                            face_recognizer.clear_captured_image()
                     else:
                         # 在真空期或窗口内等待，仅显示实时状态
                         if 'in_vacuum' in recg_res:
@@ -318,6 +343,92 @@ def face_recognition_thread():
         pass
         
     logger.info("人脸识别线程退出")
+
+def handle_server_command(command):
+    """处理服务器命令"""
+    global door_ctrl, face_recognizer, pipeline
+    
+    logger = get_logger()
+    
+    try:
+        cmd_type = command.get('command')
+        params = command.get('params', {})
+        
+        logger.info(f"执行命令: {cmd_type}")
+        
+        if cmd_type == 'open_door':
+            # 远程开门
+            door_ctrl.grant_access("Remote", "command", 1.0)
+            network_mgr.send_event('command_executed', {
+                'command': cmd_type,
+                'success': True
+            })
+            
+        elif cmd_type == 'register_face':
+            # 远程注册人脸
+            from modules.face_register import FaceRegister
+            register = FaceRegister()
+            
+            person_name = params.get('name')
+            if person_name:
+                success = register.register_from_camera(person_name, pipeline)
+                network_mgr.send_event('face_registered', {
+                    'name': person_name,
+                    'success': success
+                })
+                register.deinit()
+            
+        elif cmd_type == 'delete_face':
+            # 删除人脸
+            from modules.face_register import FaceRegister
+            register = FaceRegister()
+            
+            person_name = params.get('name')
+            if person_name:
+                success = register.delete_registration(person_name)
+                network_mgr.send_event('face_deleted', {
+                    'name': person_name,
+                    'success': success
+                })
+                register.deinit()
+                
+        elif cmd_type == 'list_faces':
+            # 列出所有注册的人脸
+            from modules.face_register import FaceRegister
+            register = FaceRegister()
+            
+            faces = register.list_registrations()
+            network_mgr.send_event('face_list', {
+                'faces': [f['name'] for f in faces],
+                'count': len(faces)
+            })
+            register.deinit()
+            
+        elif cmd_type == 'update_config':
+            # 更新配置
+            config_key = params.get('key')
+            config_value = params.get('value')
+            
+            if config_key:
+                # 这里可以实现配置更新逻辑
+                logger.info(f"更新配置: {config_key} = {config_value}")
+                
+        elif cmd_type == 'reboot':
+            # 重启设备
+            logger.info("收到重启命令")
+            network_mgr.send_event('device_offline', {'reason': 'reboot'})
+            import machine
+            machine.reset()
+            
+        else:
+            logger.warning(f"未知命令: {cmd_type}")
+            
+    except Exception as e:
+        logger.error(f"执行命令失败: {e}")
+        network_mgr.send_event('command_error', {
+            'command': command.get('command'),
+            'error': str(e)
+        })
 
 def maintenance_thread():
     """维护线程 / Maintenance thread"""
