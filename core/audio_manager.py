@@ -1,5 +1,8 @@
 from machine import Pin, PWM
 import utime
+import uos as os
+from media.media import MediaManager
+from media.pyaudio import PyAudio
 import media.wave as wave
 from utils.logger import get_logger
 from utils.config_loader import ConfigLoader
@@ -11,29 +14,14 @@ class AudioManager:
         self.config = ConfigLoader()
         self.logger = get_logger()
         
-        # 扬声器引脚配置
+        # 扬声器引脚配置 GPIO42
         speaker_pin = self.config.get('audio.speaker_pin', 42)
         self.speaker = Pin(speaker_pin, Pin.OUT, value=0)
-        
-        # 音频参数
-        self.sample_rate = self.config.get('audio.sample_rate', 24000)
-        self.channels = self.config.get('audio.channels', 1)
-        self.chunk_size = self.config.get('audio.chunk_size', 7200)
         
         # 音频文件路径
         self.audio_files = self.config.get('audio.audio_files', {})
         
         self.is_playing = False
-        
-        # 尝试初始化pyaudio
-        self.audio_stream = None
-        try:
-            import pyaudio
-            self.p = pyaudio.PyAudio()
-            self.audio_available = True
-        except:
-            self.logger.warning("PyAudio不可用，使用简单音频输出")
-            self.audio_available = False
     
     def enable_speaker(self):
         """启用扬声器 / Enable speaker"""
@@ -53,8 +41,7 @@ class AudioManager:
             duration_ms: 持续时间(毫秒)
         """
         try:
-            # 使用PWM生成音调
-            pwm = PWM(self.speaker, freq=frequency, duty=50)
+            pwm = PWM(self.speaker, freq=frequency, duty=512)
             utime.sleep_ms(duration_ms)
             pwm.deinit()
             
@@ -82,59 +69,79 @@ class AudioManager:
         
         self.is_playing = True
         
+        # 检查文件是否存在
         try:
-            if self.audio_available:
-                # 使用pyaudio播放
-                self._play_with_pyaudio(wav_file)
-            else:
-                # 使用简单播放
-                self._play_simple(wav_file)
+            os.stat(wav_file)
+        except OSError:
+            self.logger.warning(f"音频文件不存在: {wav_file}，使用蜂鸣提示")
+            self._play_beep_fallback(wav_file)
+            self.is_playing = False
+            return False
+        
+        wf = None
+        p = None
+        stream = None
+        
+        try:
+            self.enable_speaker()
             
+            # 打开wav文件
+            wf = wave.open(wav_file, 'rb')
+            
+            # 设置音频chunk值
+            CHUNK = int(wf.get_framerate() / 25)
+            
+            # 初始化PyAudio
+            p = PyAudio()
+            p.initialize(CHUNK)
+            MediaManager.init()
+            
+            # 创建音频输出流
+            stream = p.open(
+                format=p.get_format_from_width(wf.get_sampwidth()),
+                channels=wf.get_channels(),
+                rate=wf.get_framerate(),
+                output=True,
+                frames_per_buffer=CHUNK
+            )
+            
+            # 设置音量 75%
+            stream.volume(vol=75)
+            
+            # 读取并播放音频数据
+            data = wf.read_frames(CHUNK)
+            while data:
+                stream.write(data)
+                data = wf.read_frames(CHUNK)
+            
+            self.logger.info(f"播放完成: {wav_file}")
             return True
             
         except Exception as e:
-            self.logger.error(f"播放音频失败: {e}")
+            self.logger.error(f"播放音频失败: {e}，使用蜂鸣提示")
+            self._play_beep_fallback(wav_file)
             return False
+            
         finally:
+            # 清理资源
+            try:
+                if stream:
+                    stream.stop_stream()
+                    stream.close()
+                if p:
+                    p.terminate()
+                if wf:
+                    wf.close()
+                MediaManager.deinit()
+            except:
+                pass
+            
+            self.disable_speaker()
             self.is_playing = False
     
-    def _play_with_pyaudio(self, wav_file):
-        """使用pyaudio播放 / Play with pyaudio"""
-        try:
-            # 打开音频流
-            self.audio_stream = self.p.open(
-                format=self.p.get_format_from_width(2),  # 16-bit
-                channels=self.channels,
-                rate=self.sample_rate,
-                output=True,
-                frames_per_buffer=self.chunk_size
-            )
-            
-            # 打开WAV文件
-            wf = wave.open(wav_file, 'rb')
-            
-            # 播放音频
-            self.enable_speaker()
-            data = wf.readframes(self.chunk_size)
-            
-            while data:
-                self.audio_stream.write(data)
-                data = wf.readframes(self.chunk_size)
-            
-            # 清理
-            wf.close()
-            self.audio_stream.stop_stream()
-            self.audio_stream.close()
-            utime.sleep(2)  # 缓冲时间
-            
-        finally:
-            self.disable_speaker()
-    
-    def _play_simple(self, wav_file):
-        """简单播放（备用方案）/ Simple play (fallback)"""
-        # 播放预定义的蜂鸣声序列作为替代
+    def _play_beep_fallback(self, wav_file):
+        """备用蜂鸣方案 / Fallback beep"""
         self.logger.info(f"播放音频提示: {wav_file}")
-        self.enable_speaker()
         
         # 根据不同的音频文件播放不同的蜂鸣模式
         if "welcome" in wav_file:
@@ -151,8 +158,6 @@ class AudioManager:
             self.play_tone(1500, 500)
         else:
             self.play_beep(1, 1000, 100)
-        
-        self.disable_speaker()
     
     def play_feedback(self, event_type):
         """播放反馈音 / Play feedback sound
@@ -208,8 +213,6 @@ class AudioManager:
         """释放资源 / Release resources"""
         try:
             self.disable_speaker()
-            if self.audio_available and self.p:
-                self.p.terminate()
             self.logger.info("音频管理器已释放")
         except Exception as e:
             self.logger.error(f"释放音频资源失败: {e}")
