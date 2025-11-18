@@ -9,14 +9,17 @@
         "device_id": "K230_DOOR_001"
     },
     "network": {
-        "wifi_ssid": "wifi_ssid",
-        "wifi_password": "wifi_password",
-        "http_server_url": "http://YOUR_SERVER_IP:8080",
+        "network": {                                      // json不允许注释 请在实际配置中删除注释
+        "wifi_ssid": "your_wifi_ssid",
+        "wifi_password": "your_wifi_password",
+        "http_server_url": "http://192.168.1.100:8080", // 替换为您的服务器IP地址和端口
+        "time_server_url": "http://192.168.1.100:8080",  // 可选，不配置则使用http_server_url
         "http_token": "YOUR_API_TOKEN",
         "http_timeout": 10,
-        "ntp_sync": true,
+        "ntp_sync": true,  // 启用时间同步(从HTTP服务器)
         "auto_reconnect": true,
         "reconnect_interval": 5
+        }
     },
     "door": {
         "id": "main",

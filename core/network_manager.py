@@ -2,8 +2,10 @@ import network
 import utime
 import socket
 import json
+import uhashlib as hashlib
 from utils.logger import get_logger
 from utils.config_loader import ConfigLoader
+import binascii
 
 class NetworkManager:
     """网络管理器 / Network Manager"""
@@ -22,46 +24,51 @@ class NetworkManager:
         """连接WiFi网络 / Connect to WiFi network"""
         ssid = self.config.get('network.wifi_ssid')
         password = self.config.get('network.wifi_password')
-        
+    
         if not ssid:
             self.logger.error("WiFi SSID未配置")
             return False
-        
+    
         self.logger.info(f"正在连接WiFi: {ssid}")
-        
+    
         try:
             # 创建STA接口
             self.sta = network.WLAN(network.STA_IF)
             self.sta.active(True)
-            
+        
             # 尝试连接
             for attempt in range(max_retry):
                 self.sta.connect(ssid, password)
-                
+            
                 # 等待连接
                 timeout = 10
                 start_time = utime.time()
-                
+            
                 while not self.sta.isconnected():
                     if utime.time() - start_time > timeout:
                         self.logger.warning(f"WiFi连接超时 (尝试 {attempt + 1}/{max_retry})")
                         break
                     utime.sleep(1)
-                
+            
                 if self.sta.isconnected():
                     self.is_connected = True
                     ip_info = self.sta.ifconfig()
                     self.logger.info(f"WiFi连接成功! IP: {ip_info[0]}")
-                    
-                    # NTP时间同步
+                
+                    # 初始化HTTP配置
+                    self.http_server_url = self.config.get('network.http_server_url')
+                    self.http_token = self.config.get('network.http_token', '')
+                    self.http_timeout = self.config.get('network.http_timeout', 10)
+                
+                    # HTTP时间同步
                     if self.config.get('network.ntp_sync', True):
                         self.sync_time()
-                    
+                
                     return True
-            
+        
             self.logger.error("WiFi连接失败，进入离线模式")
             return False
-            
+        
         except Exception as e:
             self.logger.error(f"WiFi连接异常: {e}")
             return False
@@ -77,19 +84,139 @@ class NetworkManager:
             except Exception as e:
                 self.logger.error(f"断开WiFi失败: {e}")
     
+    # core/network_manager.py
+
     def sync_time(self):
-        """同步网络时间 / Sync network time"""
+        """从HTTP服务器同步时间戳"""
         try:
-            import utime
-            if utime.ntp_sync():
-                self.logger.info("NTP时间同步成功")
-                return True
-            else:
-                self.logger.warning("NTP时间同步失败")
+            # 检查是否启用时间同步
+            if not self.config.get('network.ntp_sync', True):
+                self.logger.info("时间同步已禁用")
                 return False
+        
+            # 获取时间同步服务器URL
+            time_server_url = self.config.get('network.time_server_url', 
+                                              self.config.get('network.http_server_url'))
+        
+            if not time_server_url:
+                self.logger.warning("时间服务器URL未配置")
+                return False
+        
+            # 从HTTP服务器获取时间戳
+            self.logger.info("正在从HTTP服务器同步时间...")
+        
+            # 直接使用socket请求，避免循环依赖
+            try:
+                # 解析URL
+                url_parts = self._parse_url(time_server_url + '/api/time')
+            
+                # DNS解析
+                addr_info = socket.getaddrinfo(url_parts['host'], url_parts['port'])
+                addr = addr_info[0][-1]
+            
+                # 创建socket连接
+                s = socket.socket()
+                s.settimeout(5)  # 时间同步使用较短超时
+                s.connect(addr)
+            
+                # 发送简单的GET请求
+                request = f"GET {url_parts['path']} HTTP/1.0\r\n"
+                request += f"Host: {url_parts['host']}\r\n"
+                if self.http_token:
+                    request += f"Authorization: Bearer {self.http_token}\r\n"
+                request += "\r\n"
+            
+                s.send(request.encode())
+            
+                # 读取响应
+                response = b""
+                while True:
+                    chunk = s.recv(1024)
+                    if not chunk:
+                        break
+                    response += chunk
+                    if b"\r\n\r\n" in response:
+                        # 找到header结束，继续读取body
+                        header_end = response.find(b"\r\n\r\n")
+                        headers_raw = response[:header_end].decode()
+                    
+                        # 获取Content-Length
+                        content_length = 0
+                        for line in headers_raw.split('\r\n'):
+                            if line.startswith('Content-Length:'):
+                                content_length = int(line.split(':')[1].strip())
+                                break
+                    
+                        # 读取完整的body
+                        body_start = header_end + 4
+                        if content_length > 0:
+                            while len(response) - body_start < content_length:
+                                chunk = s.recv(1024)
+                                if not chunk:
+                                    break
+                                response += chunk
+                        break
+            
+                s.close()
+            
+                # 解析响应
+                if b"200 OK" in response:
+                    # 提取body
+                    body_start = response.find(b"\r\n\r\n") + 4
+                    body = response[body_start:].decode()
+                
+                    # 解析JSON响应
+                    try:
+                        time_data = json.loads(body)
+                        timestamp = time_data.get('timestamp')
+                    except:
+                        # 如果不是JSON，尝试直接解析为数字
+                        try:
+                            timestamp = int(body.strip())
+                        except:
+                            self.logger.error(f"无法解析时间响应: {body}")
+                            return False
+                
+                    if timestamp:
+                        # 设置系统时间
+                        from machine import RTC
+                        rtc = RTC()
+                    
+                        # 将时间戳转换为时间元组 (年,月,日,时,分,秒,星期,年日)
+                        time_tuple = utime.localtime(timestamp)
+                    
+                        # 设置RTC时间
+                        # RTC.datetime() 格式: (year, month, day, weekday, hours, minutes, seconds, subseconds)
+                        rtc.datetime((time_tuple[0], time_tuple[1], time_tuple[2], 
+                                     time_tuple[6], time_tuple[3], time_tuple[4], 
+                                     time_tuple[5], 0))
+                    
+                        self.logger.info(f"✅ HTTP时间同步成功: {time_tuple[0]}-{time_tuple[1]:02d}-{time_tuple[2]:02d} {time_tuple[3]:02d}:{time_tuple[4]:02d}:{time_tuple[5]:02d}")
+                    
+                        # 验证时间是否设置成功
+                        utime.sleep(1)
+                        current = utime.localtime()
+                        if current[0] > 2020:
+                            self.logger.info(f"🎉 系统时间已更新: {current[:6]}")
+                            return True
+                        else:
+                            self.logger.warning("⚠️ 时间设置可能失败")
+                            return False
+                    else:
+                        self.logger.error("服务器响应中没有时间戳")
+                        return False
+                else:
+                    self.logger.error(f"HTTP时间同步请求失败")
+                    return False
+                
+            except Exception as e:
+                self.logger.error(f"HTTP时间同步异常: {e}")
+                return False
+            
         except Exception as e:
-            self.logger.error(f"NTP时间同步异常: {e}")
+            self.logger.error(f"时间同步异常: {e}")
             return False
+
     
     def check_connection(self):
         """检查网络连接状态 / Check network connection status"""
@@ -269,9 +396,10 @@ class NetworkManager:
             # 可选：添加设备签名（简单的HMAC）
             if device_secret:
                 # 创建简单的签名
-                import hashlib
+
                 signature_data = f"{device_id}:{event_type}:{utime.time()}:{device_secret}"
-                signature = hashlib.sha256(signature_data.encode()).hexdigest()[:16]
+                h = hashlib.sha256(signature_data.encode())
+                signature = binascii.hexlify(h.digest()).decode('utf-8')[:16]
                 data['signature'] = signature
             
             response = self.http_post('/api/event', data)

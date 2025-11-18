@@ -653,55 +653,49 @@ class FaceRecognition:
         return None
 
     def capture_face_image(self, person_name, score, is_success, det_boxes):
-        """捕获并保存人脸图像
-        
-        Args:
-            person_name: 识别的人名或"unknown"
-            score: 识别分数
-            is_success: 是否识别成功
-            det_boxes: 检测到的人脸框
-        """
+        """捕获并保存人脸图像"""
         if not self.capture_enabled:
             return
-        
+
         try:
             # 确保捕获目录存在
             self._ensure_directory(self.capture_dir)
-            
+
             # 生成文件名
             timestamp = int(time.ticks_ms())
             status = "granted" if is_success else "denied"
             safe_name = person_name.replace(" ", "_").replace("/", "_")
-            
+
             # 根据日期创建子目录
             import utime
             date = utime.localtime()
             date_dir = f"{self.capture_dir}{date[0]:04d}{date[1]:02d}{date[2]:02d}/"
             self._ensure_directory(date_dir)
-            
+
             # 完整文件路径
             filename = f"{status}_{safe_name}_{timestamp}.jpg"
             filepath = date_dir + filename
-            
-            # 保存图像
+
+            # ✅ 使用 media.save_img 直接保存 numpy 数组（RGB888格式）
             if hasattr(self, 'current_frame') and self.current_frame is not None:
-                # 将numpy数组转换为图像
-                img = self._numpy_to_image(self.current_frame, det_boxes)
-                
-                if img:
-                    # 保存为JPEG
-                    img.compress(quality=85)
-                    img.save(filepath)
-                    
-                    # 保存图像数据供上传使用
-                    self.last_captured_image = filepath
-                    self.last_captured_data = img.to_bytes()
-                    
+                # 尝试直接保存
+                try:
+                    from media.media import save_img
+                    # current_frame 应该是 (H, W, 3) 的 uint8 numpy array
+                    save_img(filepath, self.current_frame, quality=85)
                     self.logger.info(f"捕获图像保存: {filepath}")
-                    
-                    # 清理旧图像
-                    self._cleanup_old_captures(date_dir)
-            
+                    self.last_captured_image = filepath
+                    # 如果需要上传原始数据，可读回文件 or 保留 np_array
+                    with open(filepath, 'rb') as f:
+                        self.last_captured_data = f.read()
+                except Exception as e:
+                    self.logger.error(f"media.save_img 失败: {e}")
+                    # 回退到旧方法（如果可用）
+                    self._fallback_save_image(filepath, det_boxes)
+
+            # 清理旧图像
+            self._cleanup_old_captures(date_dir)
+
         except Exception as e:
             self.logger.error(f"捕获图像失败: {e}")
     
