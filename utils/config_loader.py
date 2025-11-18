@@ -1,5 +1,5 @@
 import ujson as json
-import os
+import uos as os
 
 class ConfigLoader:
     """配置文件加载器 / Configuration file loader"""

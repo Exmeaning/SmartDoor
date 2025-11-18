@@ -1,7 +1,7 @@
 from libs.PipeLine import PipeLine, ScopedTiming
 from libs.AIBase import AIBase
 from libs.AI2D import Ai2d
-import os
+import uos as os
 import ujson
 from media.media import *
 from time import *

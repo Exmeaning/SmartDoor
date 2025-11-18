@@ -11,7 +11,7 @@ class MotorController:
         self.logger = get_logger()
         
         # 读取引脚配置
-        pul_pin = self.config.get('motor.pul_pin', 42)
+        pul_pin = self.config.get('motor.pul_pin', 43)
         dir_pin = self.config.get('motor.dir_pin', 33)
         en_pin = self.config.get('motor.en_pin', 32)
         

@@ -1,5 +1,5 @@
 import utime
-import os
+import uos as os
 import gc
 
 class Logger:

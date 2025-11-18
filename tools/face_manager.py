@@ -7,7 +7,7 @@ Command line tool for managing face registrations
 """
 
 import sys
-import os
+import uos as os
 from modules.face_register import FaceRegister
 from utils.logger import get_logger
 from utils.config_loader import ConfigLoader

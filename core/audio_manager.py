@@ -1,6 +1,6 @@
 from machine import Pin, PWM
 import utime
-import wave
+import media.wave as wave
 from utils.logger import get_logger
 from utils.config_loader import ConfigLoader
 
@@ -12,7 +12,7 @@ class AudioManager:
         self.logger = get_logger()
         
         # 扬声器引脚配置
-        speaker_pin = self.config.get('audio.speaker_pin', 35)
+        speaker_pin = self.config.get('audio.speaker_pin', 42)
         self.speaker = Pin(speaker_pin, Pin.OUT, value=0)
         
         # 音频参数

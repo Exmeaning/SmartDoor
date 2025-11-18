@@ -1,7 +1,7 @@
 from libs.PipeLine import PipeLine, ScopedTiming
 from libs.AIBase import AIBase
 from libs.AI2D import Ai2d
-import os
+import uos as os
 import ujson
 from media.media import *
 from time import *
@@ -309,10 +309,7 @@ class FaceRecognition:
         """初始化人脸数据库"""
         with ScopedTiming("database_init", self.debug_mode > 1):
             try:
-                if not os.path.exists(self.database_dir):
-                    self.logger.warning(f"数据库目录不存在: {self.database_dir}")
-                    return
-                    
+                os.stat(self.database_dir)
                 db_file_list = os.listdir(self.database_dir)
                 for db_file in db_file_list:
                     if not db_file.endswith('.bin'):
@@ -335,6 +332,10 @@ class FaceRecognition:
                     
             except Exception as e:
                 self.logger.error(f"数据库初始化失败: {e}")
+
+            except OSError:  
+                self.logger.warning(f"数据库目录不存在: {self.database_dir}")  
+                return
 
     def database_reset(self):
         """重置数据库"""
