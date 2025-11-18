@@ -9,7 +9,7 @@
 ## 功能特性 / Features
 
 - 🔍 **人脸检测与识别** - 实时人脸检测，支持多人脸识别
-- 🌐 **网络连接** - WiFi连接，TCP通信，NTP时间同步
+- 🌐 **网络连接** - WiFi连接，HTTP通信，NTP时间同步
 - 🔐 **门禁控制** - 步进电机控制，自动开关门
 - 🔊 **音频反馈** - 语音提示，蜂鸣器警告
 - 💤 **智能休眠** - 无人时自动休眠，降低功耗
@@ -130,9 +130,7 @@ network.connect_wifi()
 # 检查连接
 network.check_connection()
 
-# TCP通信
-network.create_tcp_client()
-network.send_tcp_data(data)
+
 ```
 
 ## 日志说明 / Logging

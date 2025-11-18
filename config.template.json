@@ -1,18 +1,28 @@
 {
     "system": {
+        "device_name": "设备名称",
+        "device_secret": "CHANGE_THIS_SECRET_KEY",
+        "version": "1.0.0",
         "debug_mode": 0,
         "log_level": "INFO",
         "log_retention_days": 30,
         "device_id": "K230_DOOR_001"
     },
     "network": {
-        "wifi_ssid": "YOUR_WIFI_SSID",
-        "wifi_password": "YOUR_WIFI_PASSWORD",
-        "tcp_server_ip": "10.100.228.5",
-        "tcp_server_port": 60000,
+        "wifi_ssid": "wifi_ssid",
+        "wifi_password": "wifi_password",
+        "http_server_url": "http://YOUR_SERVER_IP:8080",
+        "http_token": "YOUR_API_TOKEN",
+        "http_timeout": 10,
         "ntp_sync": true,
         "auto_reconnect": true,
         "reconnect_interval": 5
+    },
+    "door": {
+        "id": "main",
+        "name": "主门",
+        "auto_lock_delay": 5000,
+        "max_open_duration": 30000
     },
     "face_recognition": {
         "det_model_path": "/sdcard/kmodel/face_detection_320.kmodel",

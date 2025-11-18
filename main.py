@@ -94,25 +94,51 @@ def network_thread():
     if network_mgr.connect_wifi():
         door_ctrl.audio.play_feedback('network_connected')
         
-        # 启动TCP客户端
-        # network_mgr.create_tcp_client()
+        # 初始化HTTP客户端
+        if network_mgr.init_http_client():
+            logger.info("HTTP客户端初始化成功")
+            
+            # 发送设备上线事件
+            device_info = {
+                'device_id': config.get('system.device_id', 'unknown'),
+                'device_name': config.get('system.device_name', 'K230'),
+                'firmware_version': config.get('system.version', '1.0.0')
+            }
+            network_mgr.send_event('device_online', device_info)
+        else:
+            logger.warning("HTTP客户端初始化失败")
     else:
         door_ctrl.audio.play_feedback('network_failed')
         logger.warning("网络连接失败，运行在离线模式")
     
     # 网络监控循环
+    last_heartbeat = utime.time()
     while running:
         try:
             # 自动重连检查
             if config.get('network.auto_reconnect', True):
                 if not network_mgr.check_connection():
-                    network_mgr.auto_reconnect()
+                    if network_mgr.auto_reconnect():
+                        network_mgr.init_http_client()
+            
+            # 发送心跳
+            current_time = utime.time()
+            if current_time - last_heartbeat > 30:  # 每30秒发送一次心跳
+                if network_mgr.is_connected:
+                    response = network_mgr.http_get('/api/heartbeat')
+                    if response and response['status_code'] == 200:
+                        logger.debug("心跳发送成功")
+                    last_heartbeat = current_time
             
             utime.sleep(5)  # 每5秒检查一次
             
         except Exception as e:
             logger.error(f"网络线程错误: {e}")
             utime.sleep(5)
+    
+    # 发送设备离线事件
+    if network_mgr.is_connected:
+        network_mgr.send_event('device_offline', {'reason': 'shutdown'})
     
     logger.info("网络线程退出")
 
@@ -220,6 +246,20 @@ def face_recognition_thread():
                 
                 # 有人脸时的处理逻辑
                 if det_boxes and len(det_boxes) > 0:
+                    
+                    # 保存当前帧图像（用于上传）
+                    try:
+                        if door_ctrl and img is not None:
+                            # 将图像数据传递给door_ctrl以便后续上传
+                            # 转换为JPEG格式的bytes
+                            import ubinascii
+                            if hasattr(img, 'tobytes'):
+                                image_bytes = img.tobytes()
+                            else:
+                                image_bytes = bytes(img)
+                            door_ctrl.set_captured_image(image_bytes)
+                    except Exception as e:
+                        logger.debug(f"保存图像失败: {e}")
                     
                     # 绘制结果
                     face_recognizer.draw_result(pipeline, det_boxes, recg_res)

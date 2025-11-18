@@ -28,6 +28,24 @@ class DoorController:
         self.access_history = []
         self.max_history_size = 100
         
+        # 图片缓存（用于上传）
+        self.last_captured_image = None
+        
+        # 获取网络管理器实例（如果可用）
+        self.network_mgr = None
+        self._init_network()
+    
+    def _init_network(self):
+        """初始化网络管理器引用"""
+        try:
+            # 获取全局网络管理器实例（不创建新的）
+            import sys
+            if hasattr(sys.modules.get('__main__', None), 'network_mgr'):
+                self.network_mgr = sys.modules['__main__'].network_mgr
+                self.logger.debug("网络管理器已连接")
+        except Exception as e:
+            self.logger.debug(f"网络管理器不可用: {e}")
+        
     def grant_access(self, person_name, method="face", confidence=0.0):
         """授权访问 / Grant access
         
@@ -62,12 +80,27 @@ class DoorController:
                 })
                 
                 # 发送到云端
-                self._send_to_cloud({
+                cloud_data = {
                     "event": "access_granted",
                     "person": person_name,
+                    "method": method,
+                    "confidence": confidence,
                     "time": self.last_access_time,
+                    "door_id": self.config.get('door.id', 'main'),
                     "device_id": self.config.get('system.device_id')
-                })
+                }
+                self._send_to_cloud(cloud_data)
+                
+                # 如果有捕获的图像，上传到服务器
+                if self.last_captured_image and self.network_mgr and self.network_mgr.is_connected:
+                    try:
+                        filename = f"granted_{person_name}_{int(self.last_access_time)}.jpg"
+                        self.network_mgr.upload_image('/api/upload/granted', 
+                                                     self.last_captured_image, 
+                                                     filename)
+                        self.logger.debug(f"已上传访问图像: {filename}")
+                    except Exception as e:
+                        self.logger.debug(f"上传图像失败: {e}")
                 
                 return True
             else:
@@ -86,6 +119,8 @@ class DoorController:
             person_name: 尝试访问者
         """
         try:
+            current_time = utime.time()
+            
             # 记录日志
             self.logger.log_door_event("ACCESS_DENIED", person_name, "face", 
                                      {"reason": reason})
@@ -95,20 +130,33 @@ class DoorController:
             
             # 添加到访问历史
             self._add_to_history({
-                "time": utime.time(),
+                "time": current_time,
                 "person": person_name,
                 "reason": reason,
                 "result": "denied"
             })
             
             # 发送警告到云端
-            self._send_to_cloud({
+            cloud_data = {
                 "event": "access_denied",
                 "person": person_name,
                 "reason": reason,
-                "time": utime.time(),
+                "time": current_time,
+                "door_id": self.config.get('door.id', 'main'),
                 "device_id": self.config.get('system.device_id')
-            })
+            }
+            self._send_to_cloud(cloud_data)
+            
+            # 如果有捕获的图像，上传到服务器作为安全记录
+            if self.last_captured_image and self.network_mgr and self.network_mgr.is_connected:
+                try:
+                    filename = f"denied_{person_name}_{int(current_time)}.jpg"
+                    self.network_mgr.upload_image('/api/upload/denied', 
+                                                 self.last_captured_image, 
+                                                 filename)
+                    self.logger.debug(f"已上传拒绝访问图像: {filename}")
+                except Exception as e:
+                    self.logger.debug(f"上传图像失败: {e}")
             
         except Exception as e:
             self.logger.error(f"记录拒绝访问失败: {e}")
@@ -127,6 +175,14 @@ class DoorController:
             
             # 记录事件
             self.logger.log_door_event("EMERGENCY_OPEN", "SYSTEM", "emergency")
+            
+            # 发送紧急事件到云端
+            self._send_to_cloud({
+                "event": "emergency_open",
+                "time": utime.time(),
+                "door_id": self.config.get('door.id', 'main'),
+                "device_id": self.config.get('system.device_id')
+            })
             
             return success
             
@@ -149,6 +205,14 @@ class DoorController:
                 
                 # 记录事件
                 self.logger.log_door_event("DOOR_LOCKED", "SYSTEM", "auto")
+                
+                # 发送关门事件到云端
+                self._send_to_cloud({
+                    "event": "door_locked",
+                    "time": utime.time(),
+                    "door_id": self.config.get('door.id', 'main'),
+                    "device_id": self.config.get('system.device_id')
+                })
                 
             return success
             
@@ -174,12 +238,28 @@ class DoorController:
     def _send_to_cloud(self, data):
         """发送数据到云端 / Send data to cloud"""
         try:
-            # TODO: 实现云端数据发送
-            # 这里先记录日志
-            self.logger.debug(f"发送到云端: {data}")
-            
+            # 如果网络管理器可用且已连接，通过HTTP发送
+            if self.network_mgr and self.network_mgr.is_connected:
+                # 使用send_event方法发送事件
+                event_type = data.get('event', 'unknown')
+                self.network_mgr.send_event(event_type, data)
+                self.logger.debug(f"已发送到云端: {event_type}")
+            else:
+                # 网络不可用，仅记录日志
+                self.logger.debug(f"离线模式，数据已缓存: {data}")
+                
+                # TODO: 可以将数据存储到本地，等网络恢复后批量上传
+                
         except Exception as e:
             self.logger.error(f"发送云端数据失败: {e}")
+    
+    def set_captured_image(self, image_data):
+        """设置捕获的图像数据（供人脸识别模块调用）
+        
+        Args:
+            image_data: 图像数据（bytes格式）
+        """
+        self.last_captured_image = image_data
     
     def get_statistics(self):
         """获取统计信息 / Get statistics"""
